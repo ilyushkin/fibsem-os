@@ -20,9 +20,9 @@ from fibsem.microscope import (
     _check_stage_movement,
 )
 
-logging.getLogger().setLevel(level=logging.DEBUG)
 
 TESCAN_API_AVAILABLE = False
+TESCAN_API_TIMEOUT = 60        # Max time in seconds to wait for Tescanautomation API to respond
 
 try:
     import tescanautomation
@@ -314,7 +314,8 @@ class TescanMicroscope(FibsemMicroscope):
         self.connection = Automation(ip_address, port)
         logging.info(f"Microscope client connected to [{ip_address}:{port}]")
 
-        self._default_detector_names = {BeamType.ELECTRON: "SE", BeamType.ION: "SE"}
+        #self._default_detector_names = {BeamType.ELECTRON: "SE", BeamType.ION: "SE"}
+        self._default_detector_names = {BeamType.ELECTRON: "E-T", BeamType.ION: "SE"}
         self._active_detector: Dict[BeamType, Detector] = {}    
 
         # TODO: use what the user specified in the configuration file
@@ -401,8 +402,13 @@ class TescanMicroscope(FibsemMicroscope):
                 rect=image_roi, 
                 image_shape=(image_width, image_height)
             )
+            start_time = time.time()
+            while (beam.IsBusy()):
+                logging.debug(f"Busy waiting for the {beam} beam to become ready.")
+                if time.time() - start_time > TESCAN_API_TIMEOUT:
+                    raise Exception(f"Beam {beam} is not ready. Timeout expired.")
+                time.sleep(1)
 
-            time.sleep(6)
             image = beam.Scan.AcquireROI(
                 Detector=self._active_detector[effective_beam_type],
                 Width=image_width,
