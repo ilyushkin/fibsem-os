@@ -1344,6 +1344,16 @@ class TescanMicroscope(FibsemMicroscope):
         # stop the scanning before we start scanning or before automatic procedures,
         beam.Scan.Stop()
 
+        start_time = time.monotonic()
+        while (beam.IsBusy()):
+            logging.debug(f"Waiting for the {beam_type.name} beam to become ready.")
+            if time.monotonic() - start_time > TESCAN_BEAM_READY_TIMEOUT:
+                raise TimeoutError(
+                    f"{beam_type.name} beam is not ready. "
+                    f"Timeout of {TESCAN_BEAM_READY_TIMEOUT} seconds expired."
+                )
+            time.sleep(1)
+
         return beam
 
     def _get_presets(self, beam_type: BeamType) -> List[str]:
