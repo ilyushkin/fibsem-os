@@ -274,6 +274,9 @@ class BasicMillingTaskConfig(AutoLamellaTaskConfig):
             self.milling = deepcopy({"milling": DEFAULT_MILLING_CONFIG[TRENCH_KEY]})
 
 
+_LIFECYCLE_STEPS = {"STARTED", "FINISHED"}
+
+
 class AutoLamellaTask(ABC):
     """Base class for AutoLamella tasks."""
     config_cls: ClassVar[AutoLamellaTaskConfig]
@@ -290,6 +293,7 @@ class AutoLamellaTask(ABC):
         self.parent_ui = parent_ui
         self.task_id = str(uuid.uuid4())
         self._stop_event = self.parent_ui._workflow_stop_event if self.parent_ui else None
+        self._last_fib_image: Optional[FibsemImage] = None
 
     @property
     def task_type(self) -> str:
@@ -344,7 +348,9 @@ class AutoLamellaTask(ABC):
         self.log_status_message(message="FINISHED", display_message="Finished")
         self.log_task_config()
         self.lamella.task_config[self.task_name] = deepcopy(self.config)
-        self.lamella.task_history.append(deepcopy(self.lamella.task_state)) # TODO: append to the history if task fails?
+        self.lamella.task_history.append(deepcopy(self.lamella.task_state))
+        if self._last_fib_image is not None:
+            self.lamella.save_thumbnail(self._last_fib_image) # TODO: append to the history if task fails?
 
     def log_task_config(self) -> None:
         """Log the task configuration to the log file. This can be used for debugging or reporting."""
@@ -377,9 +383,15 @@ class AutoLamellaTask(ABC):
             self.lamella.task_state.step = message
             self.lamella.task_state.status_message = display_message if display_message is not None else ""
 
+        if message not in _LIFECYCLE_STEPS and self.parent_ui is not None:
+            self.parent_ui.step_update_signal.emit(display_message or message)
+
         if display_message is not None:
-            self.update_status_ui(message = display_message, 
+            self.update_status_ui(message = display_message,
                                   workflow_info = workflow_display_message)
+            # if random.random() > 0.9:
+            #     time.sleep(3) # simulate long-running task
+            #     raise ValueError("Randomly triggered abort check during status update for testing purposes.")
 
     def update_status_ui(self, message: str, workflow_info: Optional[str] = None) -> None:
         update_status_ui(parent_ui=self.parent_ui, 
@@ -426,12 +438,13 @@ class AutoLamellaTask(ABC):
             self.parent_ui.milling_task_config_widget.milling_widget.start_milling_signal.emit()
 
             # wait for milling to start
-            wait_for_milling_timeout = 5  # seconds
+            wait_for_milling_timeout = 60  # seconds
             start_wait = time.time()
             while not self.parent_ui.milling_task_config_widget.milling_widget.is_milling:
+                logging.info("Waiting for milling to start...")
                 if time.time() - start_wait > wait_for_milling_timeout:
                     logging.warning(f"Timed out waiting for milling to start after {wait_for_milling_timeout}s.")
-                    break
+                    raise TimeoutError("Timed out waiting for milling to start.")
                 self._check_for_abort()
                 time.sleep(0.1)
 
@@ -556,6 +569,8 @@ class AutoLamellaTask(ABC):
                                                         image_settings,
                                                         acquire_sem=acquire_sem,
                                                         acquire_fib=acquire_fib)
+        if fib_image is not None:
+            self._last_fib_image = fib_image
         set_images_ui(self.parent_ui, sem_image, fib_image)
 
     def _acquire_set_of_channels(self, image_settings: ImageSettings, 
@@ -581,6 +596,8 @@ class AutoLamellaTask(ABC):
         )
 
         sem_image, fib_image = images[-1] # last acquired image
+        if fib_image is not None:
+            self._last_fib_image = fib_image
         set_images_ui(self.parent_ui, sem_image, fib_image)  # show the last acquired image
 
     def _move_to_milling_pose(self) -> None:
@@ -658,8 +675,6 @@ class MillTrenchTask(AutoLamellaTask):
                                             alignment_current=None,
                                             steps=1, subsystem="stage")
 
-        self.log_status_message("MILL_TRENCH", "Preparing to Mill Trench...")
-
         # get trench milling stages
         milling_task_config = self.config.milling[TRENCH_KEY]
 
@@ -667,6 +682,7 @@ class MillTrenchTask(AutoLamellaTask):
         self._acquire_reference_image(image_settings, field_of_view=milling_task_config.field_of_view)
 
         # log the task configuration
+        self.log_status_message("MILL_TRENCH", "Milling Trench...")
         msg = f"Press Run Milling to mill the Trench for {self.lamella.name}. Press Continue when done."
         milling_task_config.acquisition.imaging.path = self.lamella.path
         milling_task_config = self.update_milling_config_ui(milling_task_config, 
@@ -995,11 +1011,13 @@ class SelectMillingPositionTask(AutoLamellaTask):
             elif self.validate:
                 current_milling_angle = self.microscope.get_current_milling_angle()
                 ret = ask_user(parent_ui=self.parent_ui,
-                            msg=f"Tilt to specified milling angle ({milling_angle:.1f} {constants.DEGREE_SYMBOL})? "
-                            f"Current milling angle is {current_milling_angle:.1f} {constants.DEGREE_SYMBOL}.",
+                            msg=f"Tilt to specified milling angle ({milling_angle:.1f}{constants.DEGREE_SYMBOL})? "
+                            f"Current milling angle is {current_milling_angle:.1f}{constants.DEGREE_SYMBOL}.",
                             pos="Tilt", neg="Skip")
                 if ret:
                     self.microscope.move_to_milling_angle(milling_angle=np.radians(milling_angle))
+            else:
+                self.microscope.move_to_milling_angle(milling_angle=np.radians(milling_angle))
 
             if self.config.use_autofocus:
                 self.microscope.auto_focus(beam_type=BeamType.ION)
@@ -1193,14 +1211,15 @@ class TaskNotRegisteredError(Exception):
 
 def load_task_config(ddict: Dict[str, Any]) -> EventedDict[str, AutoLamellaTaskConfig]:
     """Load task configurations from a dictionary."""
+    from fibsem.applications.autolamella.workflows.tasks import get_tasks
+    task_registry = get_tasks()
     task_config = EventedDict()
     for name, v in ddict.items():
         task_type = v.get("task_type")
-        if task_type not in TASK_REGISTRY:
-            # raise ValueError(f"Task '{name}' is not registered.")
+        if task_type not in task_registry:
             logging.warning(f"Task '{name}' is not registered. Skipping.")
             continue
-        config_class = TASK_REGISTRY[task_type].config_cls
+        config_class = task_registry[task_type].config_cls
         task_config[name] = config_class.from_dict(v)
         task_config[name].task_name = name
     return task_config
@@ -1212,28 +1231,17 @@ def load_config(task_type: str, ddict: Dict[str, Any]) -> AutoLamellaTaskConfig:
 
 def get_task_config(task_type: str) -> Type[AutoLamellaTaskConfig]:
     """Get the task configuration by name."""
-    if task_type not in TASK_REGISTRY:
+    from fibsem.applications.autolamella.workflows.tasks import get_tasks
+    task_registry = get_tasks()
+    if task_type not in task_registry:
         raise TaskNotRegisteredError(task_type)
-    return TASK_REGISTRY[task_type].config_cls  # type: ignore
+    return task_registry[task_type].config_cls  # type: ignore
 
 # related tasks (must be defined after task definitions, due to circular nature)
 MillFiducialTaskConfig.related_tasks = [MillRoughTaskConfig, MillPolishingTaskConfig]
 MillRoughTaskConfig.related_tasks = [MillFiducialTaskConfig, MillPolishingTaskConfig]
 MillPolishingTaskConfig.related_tasks = [MillFiducialTaskConfig, MillRoughTaskConfig]
 
-TASK_REGISTRY: Dict[str, Type[AutoLamellaTask]] = {
-    MillTrenchTaskConfig.task_type: MillTrenchTask,
-    MillUndercutTaskConfig.task_type: MillUndercutTask,
-    MillRoughTaskConfig.task_type: MillRoughTask,
-    MillPolishingTaskConfig.task_type: MillPolishingTask,
-    SpotBurnFiducialTaskConfig.task_type: SpotBurnFiducialTask,
-    MillFiducialTaskConfig.task_type: MillFiducialTask,
-    AcquireReferenceImageConfig.task_type: AcquireReferenceImageTask,
-    BasicMillingTaskConfig.task_type: BasicMillingTask,
-    SelectMillingPositionTaskConfig.task_type: SelectMillingPositionTask,
-    "SETUP_LAMELLA": MillFiducialTask, # BACKWARDS_COMPATIBILITY
-    # Add other tasks here as needed
-}
 
 def run_task(microscope: FibsemMicroscope, 
           task_name: str, 
@@ -1245,7 +1253,8 @@ def run_task(microscope: FibsemMicroscope,
     if task_config is None:
         raise ValueError(f"Task configuration for {task_name} not found in lamella tasks.")
 
-    task_cls = TASK_REGISTRY.get(task_config.task_type)
+    from fibsem.applications.autolamella.workflows.tasks import get_tasks
+    task_cls = get_tasks().get(task_config.task_type)
     if task_cls is None:
         raise ValueError(f"Task {task_config.task_type} is not registered.")
 
@@ -1255,41 +1264,12 @@ def run_task(microscope: FibsemMicroscope,
                     parent_ui=parent_ui)
     task.run()
 
-def sync_lamella_config_updates(lamella: 'Lamella', parent_ui: Optional['AutoLamellaUI'] = None) -> 'Lamella':
-    """Sync config updates from GUI to lamella before processing.
-    
-    This is a placeholder implementation that can be extended to:
-    - Check for pending config updates in the UI
-    - Apply updates to milling parameters, imaging settings, etc.
-    - Validate updates for safety during processing
-    
-    Args:
-        lamella: The lamella to update
-        parent_ui: Parent UI containing updated configurations
-        
-    Returns:
-        Updated lamella with synced configuration
-    """
-    if parent_ui is None:
-        return lamella
-        
-    # TODO: Implement actual config sync logic here
-    # Example areas to sync:
-    # - Milling currents and patterns from UI widgets
-    # - Imaging parameters (HFW, resolution, etc.)
-    # - Task-specific settings from protocol editor
-    # - Lamella-specific overrides
-    
-    logging.debug(f"Config sync check for lamella {lamella.name} (placeholder)")
-    return lamella
-
-
 # TODO: create a TaskManager class to handle this?
 def run_tasks(microscope: FibsemMicroscope,
             experiment: 'Experiment',
             task_names: List[str],
             required_lamella: Optional[List[str]] = None,
-            parent_ui: Optional['AutoLamellaUI'] = None,) -> 'Experiment':
+            parent_ui: Optional['AutoLamellaUI'] = None,) -> None:
     """Run the specified tasks for all lamellas in the experiment.
     Args:
         microscope (FibsemMicroscope): The microscope instance.
@@ -1350,7 +1330,9 @@ def run_tasks(microscope: FibsemMicroscope,
                             "current_lamella_index": required_lamella.index(lamella.name) if lamella.name in required_lamella else None,
                             "total_lamellas": len(required_lamella) if required_lamella else None,
                             "error_message": None,
-                            "status": AutoLamellaTaskStatus.Skipped
+                            "status": AutoLamellaTaskStatus.Skipped,
+                            "timestamp": time.time(),
+                            "task_duration": None,
                         }
                     })
                 continue
@@ -1375,7 +1357,9 @@ def run_tasks(microscope: FibsemMicroscope,
                                 "current_lamella_index": required_lamella.index(lamella.name),
                                 "total_lamellas": len(required_lamella),
                                 "error_message": None,
-                                "status": AutoLamellaTaskStatus.InProgress
+                                "status": AutoLamellaTaskStatus.InProgress,
+                                "timestamp": time.time(),
+                                "task_duration": None,
                                 }
                             })
 
@@ -1403,7 +1387,7 @@ def run_tasks(microscope: FibsemMicroscope,
                     msg = f"Error in task {task_name} for Lamella {lamella.name}."
 
                 parent_ui.workflow_update_signal.emit({"msg": msg,
-                "status": {"task_name": task_name, 
+                "status": {"task_name": task_name,
                             "task_names": task_names,
                             "total_tasks": len(task_names),
                             "current_task_index": task_names.index(task_name),
@@ -1412,7 +1396,9 @@ def run_tasks(microscope: FibsemMicroscope,
                             "current_lamella_index": required_lamella.index(lamella.name),
                             "total_lamellas": len(required_lamella),
                             "error_message": lamella.task_state.status_message,
-                            "status": lamella.task_state.status
+                            "status": lamella.task_state.status,
+                            "timestamp": time.time(),
+                            "task_duration": lamella.task_state.duration,
                             }
                         })
 
@@ -1426,4 +1412,3 @@ def run_tasks(microscope: FibsemMicroscope,
     update_status_ui(parent_ui, "", workflow_info="All tasks completed.")
 
     print(experiment.task_history_dataframe())
-    return experiment

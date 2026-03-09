@@ -4,21 +4,26 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
-from PyQt5.QtCore import pyqtSignal
-from PyQt5.QtGui import QCursor, QIcon
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QCursor, QIcon, QTransform
 from PyQt5.QtWidgets import (
     QAction,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMenu,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
+from superqt import QIconifyIcon
 
+from fibsem.ui import stylesheets as stylesheets
 from fibsem.ui.utils import WheelBlocker
 from fibsem.utils import format_value
 
@@ -63,12 +68,50 @@ class QFilePathLineEdit(QWidget):
         self.lineEdit.setText(text)
 
 
+class QDirectoryLineEdit(QWidget):
+    textChanged = pyqtSignal(str)
+    editingFinished = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        layout = QHBoxLayout(self)
+        self.lineEdit = QLineEdit(self)
+        self.button_browse = QToolButton(self)
+        self.button_browse.setText("...")
+        self.button_browse.setMaximumWidth(80)
+        layout.addWidget(self.lineEdit)
+        layout.addWidget(self.button_browse)
+
+        self.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.setLayout(layout)
+
+        self.button_browse.clicked.connect(self.browse_directory)
+        self.lineEdit.textChanged.connect(self.textChanged.emit)
+        self.lineEdit.editingFinished.connect(self.editingFinished.emit)
+
+    def browse_directory(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select Directory", self.lineEdit.text())
+        if directory:
+            self.lineEdit.setText(directory)
+            self.textChanged.emit(directory)
+            self.editingFinished.emit()
+
+    def text(self) -> str:
+        return self.lineEdit.text()
+
+    def setText(self, text: str) -> None:
+        self.lineEdit.setText(text)
+
 def _create_combobox_control(value: Union[str, int, float, Enum], 
                              items: list, 
                              units: Optional[str], 
-                             format_fn: Optional[Callable] = None) -> QComboBox:
+                             format_fn: Optional[Callable] = None, 
+                             control: Optional[QComboBox] = None) -> QComboBox:
     """Create a QComboBox control for selecting from a list of items."""
-    control = QComboBox()
+    if control is None:
+        control = QComboBox()
     for item in items:
         if isinstance(item, (float, int)):
             item_str = format_value(val=item, unit=units, precision=1)
@@ -98,6 +141,70 @@ def _create_combobox_control(value: Union[str, int, float, Enum],
     return control
 
 
+class ValueComboBox(QComboBox):
+    """QComboBox that stores raw values as item data and supports closest-match selection."""
+
+    def __init__(
+        self,
+        items: list,
+        value=None,
+        unit: Optional[str] = None,
+        format_fn: Optional[Callable] = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        for item in items:
+            if isinstance(item, (float, int)):
+                item_str = format_value(val=item, unit=unit, precision=1)
+            elif isinstance(item, Enum):
+                item_str = item.name
+            elif format_fn is not None:
+                item_str = format_fn(item)
+            else:
+                item_str = str(item)
+            self.addItem(item_str, item)
+        self.installEventFilter(WheelBlocker(parent=self))
+        if value is not None:
+            self.set_value(value)
+
+    def set_value(self, value) -> None:
+        """Select the item matching value; falls back to closest numeric match."""
+        idx = self.findData(value)
+        if idx == -1 and self.count() > 0:
+            items = [self.itemData(i) for i in range(self.count())]
+            if items and isinstance(items[0], (int, float)):
+                closest = min(items, key=lambda x: abs(x - value))
+                idx = self.findData(closest)
+        if idx != -1:
+            self.setCurrentIndex(idx)
+
+    def value(self):
+        """Return the raw value stored as item data for the current selection."""
+        return self.currentData()
+
+
+class ValueSpinBox(QDoubleSpinBox):
+    """QDoubleSpinBox with sensible defaults, WheelBlocker, and None-safe configuration."""
+
+    def __init__(
+        self,
+        suffix: Optional[str] = None,
+        minimum: Optional[float] = None,
+        maximum: Optional[float] = None,
+        step: Optional[float] = None,
+        decimals: Optional[int] = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        if suffix:
+            self.setSuffix(f" {suffix}")
+        self.setRange(minimum if minimum is not None else 0.0, maximum if maximum is not None else 1e6)
+        self.setSingleStep(step if step is not None else 0.01)
+        self.setDecimals(decimals if decimals is not None else 3)
+        self.setKeyboardTracking(False)
+        self.installEventFilter(WheelBlocker(parent=self))
+
+
 @dataclass
 class ContextMenuAction:
     """Represents a single action in a context menu."""
@@ -107,7 +214,7 @@ class ContextMenuAction:
     tooltip: Optional[str] = None
     enabled: bool = True
     separator_after: bool = False
-    data: Optional[any] = None
+    data: Optional[Any] = None
 
 
 @dataclass
@@ -123,7 +230,7 @@ class ContextMenuConfig:
         tooltip: Optional[str] = None,
         enabled: bool = True,
         separator_after: bool = False,
-        data: Optional[any] = None,
+        data: Optional[Any] = None,
     ) -> "ContextMenuConfig":
         """Add an action to the menu configuration. Returns self for chaining."""
         self.actions.append(ContextMenuAction(
@@ -257,3 +364,198 @@ def show_context_menu(
     menu = ContextMenu(config, parent=parent)
     selected = menu.show_at_cursor()
     return selected.label if selected else None
+
+@dataclass
+class FormRow:
+    """Shared form-row descriptor for metadata-driven settings widgets (milling, pattern, etc.)."""
+    label: QLabel
+    control: QWidget
+    field: str
+    advanced: bool
+    scale: Optional[float]      # effective scale (base_scale ** dims); None = no scaling
+    mfr: Optional[str] = None   # manufacturer filter; None = show for all
+
+
+class TitledPanel(QWidget):
+    """A styled panel with a dark header row (title label + optional widgets) and a collapsible content area.
+
+    Usage::
+
+        panel = TitledPanel("Milling", content=milling_widget)
+        panel.add_header_widget(btn_advanced)   # right-aligned, before collapse button
+
+        simple = TitledPanel("Pattern", content=QLabel("coming soon"))
+    """
+
+    def __init__(self, title: str, content: Optional[QWidget] = None, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("TitledPanel")
+        self.setStyleSheet(
+            "TitledPanel { border: 1px solid #3a3d42; border-radius: 4px; }"
+        )
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Header
+        self._header = QWidget()
+        self._header.setStyleSheet("background: #1e2124; border-radius: 3px 3px 0 0;")
+        self._header_layout = QHBoxLayout(self._header)
+        self._header_layout.setContentsMargins(8, 3, 4, 3)
+        self._header_layout.setSpacing(4)
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font-weight: bold; background: transparent;")
+        self._header_layout.addWidget(title_label)
+        self._header_layout.addStretch()
+
+        # Collapse toggle — always the last item in the header; checked=expanded
+        self._btn_collapse = QToolButton()
+        self._btn_collapse.setCheckable(True)
+        self._btn_collapse.setChecked(True)
+        self._btn_collapse.setStyleSheet(stylesheets.TOOLBUTTON_ICON_STYLESHEET)
+        self._btn_collapse.toggled.connect(self._on_collapse_toggled)
+        self._header_layout.addWidget(self._btn_collapse)
+
+        outer.addWidget(self._header)
+
+        # Body
+        self._body = QWidget()
+        self._body_layout = QVBoxLayout(self._body)
+        self._body_layout.setContentsMargins(4, 4, 4, 4)
+        outer.addWidget(self._body)
+
+        self._on_collapse_toggled(True)  # set initial icon + body visibility
+
+        if content is not None:
+            self.set_content(content)
+
+    def _on_collapse_toggled(self, expanded: bool) -> None:
+        self._body.setVisible(expanded)
+        icon = "mdi:chevron-up" if expanded else "mdi:chevron-down"
+        self._btn_collapse.setIcon(QIconifyIcon(icon, color=stylesheets.GRAY_ICON_COLOR))
+        self._btn_collapse.setToolTip("Collapse" if expanded else "Expand")
+
+    def add_header_widget(self, widget: QWidget) -> None:
+        """Add a widget to the right side of the header, before the collapse button."""
+        # Insert before the collapse button (always the last item)
+        self._header_layout.insertWidget(self._header_layout.count() - 1, widget)
+
+    def set_content(self, widget: QWidget) -> None:
+        """Replace the body content with widget."""
+        while self._body_layout.count():
+            self._body_layout.takeAt(0)
+        self._body_layout.addWidget(widget)
+
+
+class _SpinnerLabel(QLabel):
+    """Rotating icon label used as a lightweight acquisition progress indicator."""
+
+    def __init__(self, icon_name="mdi:loading", color="#4fc3f7", size=24,
+                 step_deg=20, interval_ms=40, parent=None):
+        super().__init__(parent)
+        self._pixmap = QIconifyIcon(icon_name, color=color).pixmap(size, size)
+        self._angle = 0
+        self._step = step_deg
+        self._timer = QTimer(self)
+        self._timer.setInterval(interval_ms)
+        self._timer.timeout.connect(self._tick)
+        self.setFixedSize(size, size)
+        self.setAlignment(Qt.AlignCenter)
+        self._render()
+
+    def _tick(self):
+        self._angle = (self._angle + self._step) % 360
+        self._render()
+
+    def _render(self):
+        t = QTransform().rotate(self._angle)
+        self.setPixmap(self._pixmap.transformed(t, Qt.SmoothTransformation))
+
+    def start(self):
+        self._timer.start()
+
+    def stop(self):
+        self._timer.stop()
+        self._angle = 0
+        self._render()
+
+
+class IconToolButton(QToolButton):
+    """QToolButton with Iconify icon and automatic checked-state icon/color/tooltip swapping.
+
+    Parameters
+    ----------
+    icon : str
+        Iconify icon name for unchecked/default state (e.g. ``"mdi:tune"``).
+    color : str, optional
+        Icon color for unchecked/default state. Defaults to ``GRAY_ICON_COLOR``.
+    checked_icon : str, optional
+        Icon name when checked. If ``None``, uses ``icon``.
+    checked_color : str, optional
+        Icon color when checked. Defaults to ``GRAY_WHITE_COLOR``.
+        Only applied when ``checked_icon`` or ``checked_color`` is provided, or
+        ``checkable=True``.
+    tooltip : str, optional
+        Tooltip for unchecked/default state.
+    checked_tooltip : str, optional
+        Tooltip when checked. Defaults to ``tooltip``.
+    checkable : bool, optional
+        Whether the button is checkable. Automatically ``True`` when
+        ``checked_icon`` or ``checked_color`` are provided.
+    checked : bool, optional
+        Initial checked state. Defaults to ``False``.
+    size : int, optional
+        If provided, calls ``setFixedSize(size, size)``.
+    parent : QWidget, optional
+    """
+
+    def __init__(
+        self,
+        icon: str,
+        color: str = stylesheets.GRAY_ICON_COLOR,
+        checked_icon: str | None = None,
+        checked_color: str | None = None,
+        tooltip: str | None = None,
+        checked_tooltip: str | None = None,
+        checkable: bool = False,
+        checked: bool = False,
+        size: int | None = None,
+        parent: QWidget | None = None,
+    ):
+        super().__init__(parent)
+        self._icon = icon
+        self._color = color
+        self._checked_icon = checked_icon if checked_icon is not None else icon
+        self._checked_color = checked_color if checked_color is not None else stylesheets.GRAY_WHITE_COLOR
+        self._tooltip = tooltip
+        self._checked_tooltip = checked_tooltip if checked_tooltip is not None else tooltip
+
+        self._has_state = checkable or checked_icon is not None or checked_color is not None
+
+        self.setStyleSheet(stylesheets.TOOLBUTTON_ICON_STYLESHEET)
+        if size is not None:
+            self.setFixedSize(size, size)
+
+        if self._has_state:
+            self.setCheckable(True)
+            self.toggled.connect(self._on_toggled)
+            # Suppress icon-swap during setChecked so _on_toggled drives it once below
+            super().setChecked(checked)
+            self._on_toggled(checked)
+        else:
+            self.setIcon(QIconifyIcon(self._icon, color=self._color))
+            if tooltip:
+                self.setToolTip(tooltip)
+
+    def _on_toggled(self, checked: bool) -> None:
+        icon = self._checked_icon if checked else self._icon
+        color = self._checked_color if checked else self._color
+        self.setIcon(QIconifyIcon(icon, color=color))
+        tip = self._checked_tooltip if checked else self._tooltip
+        if tip is not None:
+            self.setToolTip(tip)
+
+    def set_icon_state(self, checked: bool) -> None:
+        """Update icon/color/tooltip to match ``checked`` without emitting ``toggled``."""
+        self._on_toggled(checked)

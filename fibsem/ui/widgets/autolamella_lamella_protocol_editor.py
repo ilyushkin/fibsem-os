@@ -23,10 +23,11 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
-from superqt import QCollapsible
+from superqt import QCollapsible, QIconifyIcon
 from fibsem import conversions
 from fibsem.ui.napari.utilities import is_inside_image_bounds, add_points_layer
 from fibsem.utils import format_value
@@ -39,6 +40,7 @@ from fibsem.structures import FibsemImage, Point, ReferenceImageParameters
 from fibsem.ui.widgets.autolamella_task_config_widget import (
     AutoLamellaTaskParametersConfigWidget,
 )
+import fibsem.ui.stylesheets as stylesheets
 from fibsem.ui.stylesheets import BLUE_PUSHBUTTON_STYLE
 from fibsem.ui.widgets.custom_widgets import ContextMenu, ContextMenuConfig
 from fibsem.ui.widgets.milling_task_widget import FibsemMillingTaskWidget
@@ -50,6 +52,7 @@ if TYPE_CHECKING:
     from fibsem.applications.autolamella.ui import AutoLamellaUI
 
 REFERENCE_IMAGE_LAYER_NAME = "Reference Image (FIB)"
+REFERENCE_IMAGE_SEM_LAYER_NAME = "Reference Image (SEM)"
 
 
 class ApplyLamellaConfigDialog(QDialog):
@@ -304,23 +307,55 @@ class AutoLamellaProtocolEditorWidget(QWidget):
         # lamella, milling controls
         self.label_selected_lamella = QLabel("Lamella")
         self.comboBox_selected_lamella = QComboBox()
-        self.pushButton_refresh_positions = QPushButton("Refresh Experiment Data")
+        toolbutton_style = stylesheets.TOOLBUTTON_ICON_STYLESHEET
+        self.pushButton_refresh_positions = QToolButton()
+        self.pushButton_refresh_positions.setIcon(QIconifyIcon("mdi:refresh", color=stylesheets.GRAY_ICON_COLOR))
+        self.pushButton_refresh_positions.setStyleSheet(toolbutton_style)
         self.pushButton_refresh_positions.setToolTip("Refresh the list of lamella positions from the experiment (and associated data).")
         self.pushButton_refresh_positions.clicked.connect(self._refresh_experiment_positions)
-        self.pushButton_apply_to_other = QPushButton("Apply Config to Other Lamella")
-        self.pushButton_apply_to_other.setStyleSheet(BLUE_PUSHBUTTON_STYLE)
+        self.pushButton_apply_to_other = QToolButton()
+        self.pushButton_apply_to_other.setIcon(QIconifyIcon("mdi:content-copy", color=stylesheets.GRAY_ICON_COLOR))
+        self.pushButton_apply_to_other.setStyleSheet(toolbutton_style)
         self.pushButton_apply_to_other.setToolTip(
             "Apply this lamella's task configurations to other lamella in the experiment."
         )
         self.pushButton_apply_to_other.clicked.connect(self._on_apply_to_other_clicked)
-        self.pushButton_open_correlation = QPushButton("Open Correlation")
-        self.pushButton_open_correlation.setStyleSheet(BLUE_PUSHBUTTON_STYLE)
+        self.pushButton_open_correlation = QToolButton()
+        self.pushButton_open_correlation.setIcon(QIconifyIcon("mdi:target", color=stylesheets.GRAY_ICON_COLOR))
+        self.pushButton_open_correlation.setStyleSheet(toolbutton_style)
         self.pushButton_open_correlation.setToolTip(
             "Open the 3D correlation tool to align the FIB and FM images."
         )
+        self.pushButton_open_correlation.setText("Correlate")
         self.pushButton_open_correlation.clicked.connect(self._open_correlation_widget)
-        self.label_selected_milling = QLabel("Task Name")
-        self.comboBox_selected_task = QComboBox()
+
+        self.show_sem_image = False
+        self.pushButton_toggle_sem_image = QToolButton()
+        self.pushButton_toggle_sem_image.setStyleSheet(toolbutton_style)
+        self.pushButton_toggle_sem_image.setCheckable(True)
+        self.pushButton_toggle_sem_image.setChecked(self.show_sem_image)
+        self.pushButton_toggle_sem_image.toggled.connect(self._on_toggle_sem_image)
+        self._update_sem_display_controls()
+
+        self.show_related_milling_tasks = True
+        self.pushButton_toggle_related_tasks = QToolButton()
+        self.pushButton_toggle_related_tasks.setStyleSheet(toolbutton_style)
+        self.pushButton_toggle_related_tasks.setCheckable(True)
+        self.pushButton_toggle_related_tasks.setChecked(self.show_related_milling_tasks)
+        self.pushButton_toggle_related_tasks.toggled.connect(self._on_toggle_related_tasks)
+        self._update_related_tasks_display_controls()
+
+        self.button_layout = QHBoxLayout()
+        self.button_layout.addStretch()
+        self.button_layout.addWidget(self.pushButton_refresh_positions)
+        self.button_layout.addWidget(self.pushButton_apply_to_other)
+        self.button_layout.addWidget(self.pushButton_toggle_sem_image)
+        self.button_layout.addWidget(self.pushButton_toggle_related_tasks)
+        self.button_layout.addWidget(self.pushButton_open_correlation)
+        self.label_selected_task_name = QLabel("Task Name")
+        self.listWidget_selected_task = QListWidget()
+        self.listWidget_selected_task.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.listWidget_selected_task.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # type: ignore
 
         self.combobox_fm_filenames = QComboBox()
         self.combobox_fm_filenames_label = QLabel("FM Z-Stack")
@@ -329,6 +364,11 @@ class AutoLamellaProtocolEditorWidget(QWidget):
         self.combobox_fib_filenames = QComboBox()
         self.combobox_fib_filenames_label = QLabel("FIB Image")
         self.combobox_fib_filenames.currentIndexChanged.connect(self._on_image_selected)
+
+        self.combobox_sem_filenames = QComboBox()
+        self.combobox_sem_filenames_label = QLabel("SEM Image")
+        self.combobox_sem_filenames.currentIndexChanged.connect(self._on_image_selected)
+        self.combobox_sem_filenames.setEnabled(self.show_sem_image)
 
         self.label_warning = QLabel("")
         self.label_warning.setStyleSheet("color: orange;")
@@ -342,15 +382,15 @@ class AutoLamellaProtocolEditorWidget(QWidget):
         self.grid_layout.addWidget(self.comboBox_selected_lamella, 0, 1)
         self.grid_layout.addWidget(self.combobox_fib_filenames_label, 1, 0, 1, 1)
         self.grid_layout.addWidget(self.combobox_fib_filenames, 1, 1, 1, 1)
-        self.grid_layout.addWidget(self.combobox_fm_filenames_label, 2, 0, 1, 1)
-        self.grid_layout.addWidget(self.combobox_fm_filenames, 2, 1, 1, 1)
-        self.grid_layout.addWidget(self.label_selected_milling, 3, 0)
-        self.grid_layout.addWidget(self.comboBox_selected_task, 3, 1)
+        self.grid_layout.addWidget(self.combobox_sem_filenames_label, 2, 0, 1, 1)
+        self.grid_layout.addWidget(self.combobox_sem_filenames, 2, 1, 1, 1)
+        self.grid_layout.addWidget(self.combobox_fm_filenames_label, 3, 0, 1, 1)
+        self.grid_layout.addWidget(self.combobox_fm_filenames, 3, 1, 1, 1)
+        self.grid_layout.addWidget(self.label_selected_task_name, 4, 0)
+        self.grid_layout.addWidget(self.listWidget_selected_task, 4, 1)
         self.grid_layout.addWidget(self.label_status, 5, 0, 1, 2)
         self.grid_layout.addWidget(self.label_warning, 6, 0, 1, 2)
-        self.grid_layout.addWidget(self.pushButton_refresh_positions, 7, 0, 1, 2)
-        self.grid_layout.addWidget(self.pushButton_apply_to_other, 8, 0, 1, 2)
-        self.grid_layout.addWidget(self.pushButton_open_correlation, 9, 0, 1, 2)
+        self.grid_layout.addLayout(self.button_layout, 7, 0, 1, 2)
 
         # main layout
         self.main_layout = QVBoxLayout(self)
@@ -377,14 +417,12 @@ class AutoLamellaProtocolEditorWidget(QWidget):
                 self.comboBox_selected_lamella.addItem(pos.name, pos)
 
         self.comboBox_selected_lamella.currentIndexChanged.connect(self._on_selected_lamella_changed)
-        self.comboBox_selected_task.currentIndexChanged.connect(self._on_selected_task_changed)
+        self.listWidget_selected_task.itemSelectionChanged.connect(self._on_selected_task_changed)
         self.milling_task_editor.task_configs_changed.connect(self._on_milling_task_config_updated)
         self.task_parameters_config_widget.parameter_changed.connect(self._on_task_parameters_config_changed)
         self.ref_image_params_widget.settings_changed.connect(self._on_ref_image_settings_changed)
         self.milling_task_editor.config_widget.correlation_result_updated_signal.connect(self._on_point_of_interest_updated)
-
-        if cfg.FEATURE_RIGHT_CLICK_CONTEXT_MENU_ENABLED:
-            self.viewer.mouse_drag_callbacks.append(self._on_single_click)
+        self.viewer.mouse_drag_callbacks.append(self._on_single_click)
 
         if self.comboBox_selected_lamella.count() > 0:
             self.comboBox_selected_lamella.setCurrentIndex(0)
@@ -429,21 +467,25 @@ class AutoLamellaProtocolEditorWidget(QWidget):
         """Callback when the selected lamella changes."""
         selected_lamella: Lamella = self.comboBox_selected_lamella.currentData()
 
-        task_names = list(selected_lamella.task_config.keys())
-        self.comboBox_selected_task.blockSignals(True)
-        
-        selected_task = self.comboBox_selected_task.currentText()
-        self.comboBox_selected_task.clear()
+        task_names = self._sort_task_names_by_workflow(list(selected_lamella.task_config.keys()))
+        self.listWidget_selected_task.blockSignals(True)
+
+        selected_task = self._get_selected_task_name()
+        self.listWidget_selected_task.clear()
         for name in task_names:
-            self.comboBox_selected_task.addItem(name)
+            self.listWidget_selected_task.addItem(name)
 
         if selected_task in task_names:
-            self.comboBox_selected_task.setCurrentText(selected_task)
+            items = self.listWidget_selected_task.findItems(selected_task, Qt.MatchExactly)  # type: ignore
+            if items:
+                self.listWidget_selected_task.setCurrentItem(items[0])
         elif "Rough Milling" in task_names:
-            self.comboBox_selected_task.setCurrentText("Rough Milling")
-        else:
-            self.comboBox_selected_task.setCurrentIndex(0)
-        self.comboBox_selected_task.blockSignals(False)
+            items = self.listWidget_selected_task.findItems("Rough Milling", Qt.MatchExactly)  # type: ignore
+            if items:
+                self.listWidget_selected_task.setCurrentItem(items[0])
+        elif self.listWidget_selected_task.count() > 0:
+            self.listWidget_selected_task.setCurrentRow(0)
+        self.listWidget_selected_task.blockSignals(False)
 
         # load fluorescence image
         filenames = sorted(glob.glob(os.path.join(selected_lamella.path, "*.ome.tiff")))
@@ -486,19 +528,84 @@ class AutoLamellaProtocolEditorWidget(QWidget):
         self.combobox_fib_filenames.setCurrentText(default_filename)
         self.combobox_fib_filenames.blockSignals(False)
 
+        # load sem reference image
+        self.combobox_sem_filenames.blockSignals(True)
+        sem_filenames = sorted(glob.glob(os.path.join(selected_lamella.path, "*_eb.tif")))
+        sem_filenames = [f for f in sem_filenames if "alignment" not in f]
+
+        selected_sem_filename = self.combobox_sem_filenames.currentText()
+        self.combobox_sem_filenames.clear()
+        for f in sem_filenames:
+            self.combobox_sem_filenames.addItem(os.path.basename(f))
+
+        sem_base_filenames = [os.path.basename(f) for f in sem_filenames]
+
+        latest_sem_task_filename = ""
+        if selected_lamella.last_completed_task is not None:
+            last_task_name = selected_lamella.last_completed_task.name
+            reference_sem_filename = f"ref_{last_task_name}_final_res_*_eb.tif"
+            matching_sem_filenames = glob.glob(os.path.join(selected_lamella.path, reference_sem_filename))
+            if len(matching_sem_filenames) > 0:
+                latest_sem_task_filename = os.path.basename(sorted(matching_sem_filenames, key=os.path.getmtime)[-1])
+
+        default_sem_filename = sem_filenames[-1] if sem_filenames else ""
+        if latest_sem_task_filename in sem_base_filenames:
+            default_sem_filename = latest_sem_task_filename
+        elif selected_sem_filename in sem_base_filenames:
+            default_sem_filename = selected_sem_filename
+
+        self.combobox_sem_filenames.setCurrentText(default_sem_filename)
+        self.combobox_sem_filenames.blockSignals(False)
+
         # hide if no filenames
         self.combobox_fm_filenames.setVisible(len(filenames) > 0)
         self.combobox_fm_filenames_label.setVisible(len(filenames) > 0)
         self.combobox_fib_filenames.setVisible(len(fib_filenames) > 0)
         self.combobox_fib_filenames_label.setVisible(len(fib_filenames) > 0)
+        self.combobox_sem_filenames.setVisible(len(sem_filenames) > 0)
+        self.combobox_sem_filenames_label.setVisible(len(sem_filenames) > 0)
+        self.combobox_sem_filenames.setEnabled(self.show_sem_image and len(sem_filenames) > 0)
+        self.pushButton_toggle_sem_image.setEnabled(len(sem_filenames) > 0)
 
         self._on_image_selected(0)
         self._draw_point_of_interest(selected_lamella.poi)
+
+    def _update_sem_display_controls(self):
+        """Update the sem display toggle icon and tooltip based on current state."""
+        icon_name = "mdi:eye" if self.show_sem_image else "mdi:eye-off"
+        tooltip_text = "Hide SEM reference image." if self.show_sem_image else "Show SEM reference image."
+        self.pushButton_toggle_sem_image.setIcon(QIconifyIcon(icon_name, color=stylesheets.GRAY_ICON_COLOR))
+        self.pushButton_toggle_sem_image.setToolTip(tooltip_text)
+
+    def _on_toggle_sem_image(self, checked: bool):
+        """Toggle displaying the sem image and enablement of sem controls."""
+        self.show_sem_image = checked
+        self._update_sem_display_controls()
+        self.combobox_sem_filenames.setEnabled(self.show_sem_image and self.combobox_sem_filenames.count() > 0)
+        self._on_image_selected(0)
+
+    def _update_related_tasks_display_controls(self):
+        """Update related milling task display toggle icon and tooltip."""
+        icon_name = "mdi:layers" if self.show_related_milling_tasks else "mdi:layers-off"
+        tooltip_text = (
+            "Hide related milling tasks."
+            if self.show_related_milling_tasks
+            else "Show related milling tasks."
+        )
+        self.pushButton_toggle_related_tasks.setIcon(QIconifyIcon(icon_name, color=stylesheets.GRAY_ICON_COLOR))
+        self.pushButton_toggle_related_tasks.setToolTip(tooltip_text)
+
+    def _on_toggle_related_tasks(self, checked: bool):
+        """Toggle displaying related milling tasks."""
+        self.show_related_milling_tasks = checked
+        self._update_related_tasks_display_controls()
+        self._on_selected_task_changed()
 
     def _on_image_selected(self, index):
         """Callback when an image is selected."""
         p: Lamella = self.comboBox_selected_lamella.currentData()
         fib_filename = self.combobox_fib_filenames.currentText()
+        sem_filename = self.combobox_sem_filenames.currentText()
 
         # load the fib reference image
         reference_image_path = os.path.join(p.path, fib_filename)
@@ -507,33 +614,96 @@ class AutoLamellaProtocolEditorWidget(QWidget):
         else:
             self.image = FibsemImage.generate_blank_image(hfw=150e-6, random=True)
 
-        self.viewer.layers.clear()
-        self.viewer.add_image(
-            data=self.image.filtered_data,
-            name=REFERENCE_IMAGE_LAYER_NAME,
-            colormap="gray",
-            blending="additive",
-        )
+        # load the sem reference image
+        sem_image = None
+        if self.show_sem_image and sem_filename:
+            sem_image_path = os.path.join(p.path, sem_filename)
+            if os.path.exists(sem_image_path) and os.path.isfile(sem_image_path):
+                sem_image = FibsemImage.load(sem_image_path)
+
+        # clear existing layers, except images to maintain the layer parameters (e.g. gamma, contrast limits)
+        for layer in list(self.viewer.layers): # type: ignore
+            if layer.name not in [REFERENCE_IMAGE_LAYER_NAME, REFERENCE_IMAGE_SEM_LAYER_NAME]:
+                self.viewer.layers.remove(layer) # type: ignore
+
+        self._update_fib_image_layer()
+        self._update_sem_image_layer(sem_image)
 
         self.milling_task_editor.config_widget.milling_editor_widget.set_image(self.image)
         self._on_selected_task_changed()
         self.viewer.reset_view()
 
+    def _update_fib_image_layer(self):
+        """Update the FIB reference image layer with the currently selected image, or create it if it doesn't exist."""
+        if REFERENCE_IMAGE_LAYER_NAME in self.viewer.layers:
+            self.viewer.layers[REFERENCE_IMAGE_LAYER_NAME].data = self.image.filtered_data # type: ignore
+        else:
+            self.viewer.add_image(
+                data=self.image.filtered_data,
+                name=REFERENCE_IMAGE_LAYER_NAME,
+                colormap="gray",
+                blending="additive",
+            )
+
+    def _update_sem_image_layer(self, sem_image: Optional[FibsemImage]):
+        """Add or update the SEM reference image layer, or remove it if no SEM image is provided."""
+        if sem_image is None:
+            if REFERENCE_IMAGE_SEM_LAYER_NAME in self.viewer.layers:
+                self.viewer.layers.remove(REFERENCE_IMAGE_SEM_LAYER_NAME) # type: ignore
+            return
+            
+        if REFERENCE_IMAGE_SEM_LAYER_NAME in self.viewer.layers:
+            self.viewer.layers[REFERENCE_IMAGE_SEM_LAYER_NAME].data = sem_image.filtered_data # type: ignore
+        else:
+            self.viewer.add_image(
+                data=sem_image.filtered_data,
+                name=REFERENCE_IMAGE_SEM_LAYER_NAME,
+                colormap="gray",
+                blending="additive",
+            translate=(0, -sem_image.data.shape[1]),
+        )
+
+    def _get_selected_task_name(self) -> str:
+        """Get the currently selected task name from the task list."""
+        current_item = self.listWidget_selected_task.currentItem()
+        return current_item.text() if current_item is not None else ""
+
+    # TODO: migrate this to a task_config method that returns task names in workflow order, rather than sorting here in the UI,
+    def _sort_task_names_by_workflow(self, task_names: List[str]) -> List[str]:
+        """Sort task names by experiment workflow order; keep unknown tasks in original order."""
+        experiment = self.parent_widget.experiment
+        if experiment is None or experiment.task_protocol is None:
+            return task_names
+
+        workflow_names = experiment.task_protocol.workflow_config.workflow
+        if not workflow_names:
+            return task_names
+
+        workflow_order = {name: i for i, name in enumerate(workflow_names)}
+        original_order = {name: i for i, name in enumerate(task_names)}
+        default_order = len(workflow_order)
+
+        return sorted(
+            task_names,
+            key=lambda name: (workflow_order.get(name, default_order), original_order[name]),
+        )
+
     def _on_selected_task_changed(self):
         """Callback when the selected milling stage changes."""
-        selected_stage_name = self.comboBox_selected_task.currentText()
+        selected_stage_name = self._get_selected_task_name()
+        if not selected_stage_name:
+            return
         selected_lamella: Lamella = self.comboBox_selected_lamella.currentData()
 
         task_config = selected_lamella.task_config[selected_stage_name]
         self.task_parameters_config_widget.set_task_config(task_config)
         self.ref_image_params_widget.update_from_settings(task_config.reference_imaging)
 
-
         # display milling stages from other tasks as background in the milling task editor for context
         milling_task_config = copy.deepcopy(task_config.milling)
         background_milling_stages = []
 
-        if related_configs := task_config.related_tasks:
+        if self.show_related_milling_tasks and (related_configs := task_config.related_tasks):
             for related_task_name, related_task_config in selected_lamella.task_config.items():
                 if isinstance(related_task_config, tuple(related_configs)):
                     cfg = selected_lamella.task_config.get(related_task_name, None)
@@ -558,10 +728,11 @@ class AutoLamellaProtocolEditorWidget(QWidget):
         self.milling_task_editor.setEnabled(bool(task_config.milling))
 
         # display label showing task has been completed
-        msg = ""
+        msg = "Task not yet completed."
         if selected_stage_name in [t.name for t in selected_lamella.task_history]:
             msg = f"Task '{selected_stage_name}' has been completed."
         self.label_status.setText(msg)
+        self.label_status.setVisible(bool(msg))
 
         self._draw_point_of_interest(selected_lamella.poi)
 
@@ -585,12 +756,12 @@ class AutoLamellaProtocolEditorWidget(QWidget):
     def _on_milling_task_config_updated(self, configs: Dict[str, FibsemMillingTaskConfig]):
         """Callback when the milling task config is updated."""
 
-        selected_task_name = self.comboBox_selected_task.currentText()
+        selected_task_name = self._get_selected_task_name()
+        if not selected_task_name:
+            return
         selected_lamella: Lamella = self.comboBox_selected_lamella.currentData()
         selected_lamella.task_config[selected_task_name].milling = copy.deepcopy(configs)
         logging.info(f"Updated {selected_lamella.name}, {selected_task_name} Task, Milling Tasks: {list(configs.keys())} ")
-
-        # TODO: support position sync between milling tasks, e.g. sync trench position between rough milling and polishing
 
         self._save_experiment()
 
@@ -598,7 +769,9 @@ class AutoLamellaProtocolEditorWidget(QWidget):
 
     def _on_task_parameters_config_changed(self, field_name: str, new_value: Any):
         """Callback when the task parameters config is updated."""
-        selected_task_name = self.comboBox_selected_task.currentText()
+        selected_task_name = self._get_selected_task_name()
+        if not selected_task_name:
+            return
         selected_lamella: Lamella = self.comboBox_selected_lamella.currentData()
         logging.info(f"Updated {selected_lamella.name}, {selected_task_name} Task Parameters: {field_name} = {new_value}")
 
@@ -613,7 +786,9 @@ class AutoLamellaProtocolEditorWidget(QWidget):
         """Callback when the image settings are changed."""
 
         # Update the image settings in the task config
-        selected_task_name = self.comboBox_selected_task.currentText()
+        selected_task_name = self._get_selected_task_name()
+        if not selected_task_name:
+            return
         selected_lamella: Lamella = self.comboBox_selected_lamella.currentData()
         selected_lamella.task_config[selected_task_name].reference_imaging = settings
 
@@ -622,9 +797,8 @@ class AutoLamellaProtocolEditorWidget(QWidget):
 
     def _on_point_of_interest_updated(self, point: Point):
         """Callback when the point of interest is updated."""
-        selected_task_name = self.comboBox_selected_task.currentText()
         selected_lamella: Lamella = self.comboBox_selected_lamella.currentData()
-        logging.info(f"Updated {selected_lamella.name}, {selected_task_name} Task, Point of Interest: {point}")
+        logging.info(f"Updated {selected_lamella.name}, Point of Interest: {point}")
 
         # update point of interest in the task config
         selected_lamella.poi = point
@@ -827,7 +1001,7 @@ class AutoLamellaProtocolEditorWidget(QWidget):
             return
 
         other_names = [p.name for p in experiment.positions if p._id != source_lamella._id]
-        task_names = list(source_lamella.task_config.keys())
+        task_names = self._sort_task_names_by_workflow(list(source_lamella.task_config.keys()))
 
         dialog = ApplyLamellaConfigDialog(
             source_name=source_lamella.name,
@@ -867,9 +1041,6 @@ class AutoLamellaProtocolEditorWidget(QWidget):
             msg += "\nBase protocol was also updated."
         QMessageBox.information(self, "Apply Complete", msg)
         logging.info(msg)
-
-        # Update the status label
-        self.label_status.setText(msg)
 
     def _save_experiment(self):
         """Save the experiment."""
