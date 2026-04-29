@@ -554,9 +554,9 @@ class FibsemMicroscope(ABC):
         logging.debug({"msg": "get", "key": key, "beam_type": beam_name, "value": value})
         return value
 
-    def set(self, key: str, value: Union[str, float, int, tuple, list, Point], beam_type: Optional[BeamType] = None) -> None:
+    def set(self, key: str, value: Union[str, float, int, tuple, list, Point], beam_type: Optional[BeamType] = None, **kwargs) -> None:
         """Set wrapper for logging"""
-        self._set(key, value, beam_type)
+        self._set(key, value, beam_type, **kwargs)
         beam_name = "None" if beam_type is None else beam_type.name
         logging.debug({"msg": "set", "key": key, "beam_type": beam_name, "value": value})
 
@@ -565,7 +565,7 @@ class FibsemMicroscope(ABC):
         pass
 
     @abstractmethod
-    def _set(self, key: str, value: Union[str, float, int, list, tuple, Point], beam_type: Optional[BeamType] = None) -> None:
+    def _set(self, key: str, value: Union[str, float, int, list, tuple, Point], beam_type: Optional[BeamType] = None, **kwargs) -> None:
         pass
 
     # TODO: i dont think this is needed, you set the beam settings and detector settings separately
@@ -1047,9 +1047,9 @@ class FibsemMicroscope(ABC):
         self.set("detector_brightness", brightness, beam_type)
         return self.get("detector_brightness", beam_type)
 
-    def set_preset(self, preset: str, beam_type: BeamType) -> str:
+    def set_preset(self, preset: str, beam_type: BeamType, preserve_settings=True) -> str:
         """Set the preset for the specified beam type."""
-        self.set("preset", preset, beam_type)
+        self.set("preset", preset, beam_type=beam_type, preserve_settings=preserve_settings)
         return self.get("preset", beam_type)
 
     def _get_compucentric_rotation_offset(self) -> FibsemStagePosition:

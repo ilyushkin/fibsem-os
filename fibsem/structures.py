@@ -1363,7 +1363,7 @@ class FibsemMillingSettings:
                                 "hidden": True,
                                 "tooltip": "The horizontal field width used for milling. Patterns must fit within this field of view.",
                                 })
-    preset: str = field(default="30 keV; 2nA", 
+    preset: str = field(default="30 keV; 1 nA", 
                         metadata={"label": "Preset",
                                   "type": str,
                                   "items": "dynamic",
@@ -1383,7 +1383,7 @@ class FibsemMillingSettings:
                                     "decimals": 2,
                                     "tooltip": "The spot size for the ion beam during milling.",
                                     "manufacturer": "Tescan"})
-    rate: float = field(default=3.0e-10, 
+    rate: float = field(default=1.0e-9, 
                         metadata={
                                     "label": "Rate",
                                     "type": float,

@@ -94,6 +94,7 @@ def draw_pattern(microscope: FibsemMicroscope, pattern: FibsemPatternSettings):
 def mill_stages(
     microscope: FibsemMicroscope,
     stages: List[FibsemMillingStage],
+    reference_image: FibsemImage=None,
     parent_ui=None,
 ):
     """Run a list of milling stages, with a progress bar and notifications."""
@@ -114,9 +115,10 @@ def mill_stages(
                     logging.info(ddict)
             microscope.milling_progress_signal.connect(_handle_progress)
 
-        reference_image = get_stage_reference_image(
-            microscope=microscope, milling_stage=stages[0]
-        )
+        if not reference_image:
+            reference_image = get_stage_reference_image(
+                microscope=microscope, milling_stage=stages[0]
+            )
 
         initial_beam_shift = microscope.get_beam_shift(beam_type=stages[0].milling.milling_channel)
 
@@ -159,6 +161,7 @@ def mill_stages(
                     parent_ui.milling_progress_signal.emit({"msg": f"Finished: {stage.name}"})
             except Exception as e:
                 logging.error(f"Error running milling stage: {stage.name}, {e}")
+                raise
 
         if parent_ui:
             parent_ui.milling_progress_signal.emit({"msg": f"Finished {len(stages)} Milling Stages. Restoring Imaging Conditions..."})
@@ -168,6 +171,7 @@ def mill_stages(
             import napari.utils.notifications
             napari.utils.notifications.show_error(f"Error while milling {e}")
         logging.error(e)
+        raise
     finally:
         finish_milling(
             microscope=microscope,
